@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF 智能点读机 & 本地词态内核</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf_viewer.min.css">
+    
+    <style>
+        /* --- 极致自适应液态磨砂主题 (Liquid Frosted Theme) --- */
+        :root {
+            --bg-blur: blur(25px);
+            --card-bg: rgba(15, 23, 42, 0.45);
+            --card-border: rgba(255, 255, 255, 0.12);
+            --text-color: #f8fafc;
+            --text-muted: rgba(248, 250, 252, 0.45);
+            --shadow: 0 20px 50px rgba(0, 0, 0, 0.4);
+            --color-cursor: #38bdf8;   /* 极光天蓝 */
+            --color-correct: #10b981;  /* 璀璨流翠 */
+            --color-wrong: #ef4444;    /* 警示绯红 */
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            color: var(--text-color);
+            background-color: #0b0f19;
+        }
+
+        /* --- 动态流体背景层 --- */
+        .fluid-bg {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -2;
+            overflow: hidden;
+            background: #090d16;
+        }
+
+        .circle {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(120px);
+            opacity: 0.35;
+            mix-blend-mode: screen;
+            animation: floatMove 20s infinite ease-in-out;
+        }
+
+        /* 5个绝对定位的色彩斑斓圆圈 */
+        .circle-1 { width: max(35vw, 35vh); height: max(35vw, 35vh); background: #10b981; top: -10%; left: -10%; animation-delay: 0s; }
+        .circle-2 { width: max(40vw, 40vh); height: max(40vw, 40vh); background: #8b5cf6; top: -15%; right: -10%; animation-delay: -4s; }
+        .circle-3 { width: max(38vw, 38vh); height: max(38vw, 38vh); background: #0ea5e9; bottom: -10%; left: -5%; animation-delay: -8s; }
+        .circle-4 { width: max(35vw, 35vh); height: max(35vw, 35vh); background: #ec4899; bottom: -10%; right: -5%; animation-delay: -12s; }
+        .circle-5 { width: max(45vw, 45vh); height: max(45vw, 45vh); background: #f59e0b; top: 25%; left: 25%; animation-delay: -16s; }
+
+        @keyframes floatMove {
+            0%, 100% { transform: translate(0, 0) scale(1); }
+            50% { transform: translate(8%, 12%) scale(1.15); }
+        }
+
+        .frosted-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            backdrop-filter: var(--bg-blur);
+            -webkit-backdrop-filter: var(--bg-blur);
+            z-index: -1;
+        }
+
+        /* --- 主体双栏布局 --- */
+        .main-container {
+            display: flex;
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+        }
+
+        .pdf-panel {
+            height: 100%;
+            flex: 1;
+            min-width: 200px;
+            overflow-y: auto;
+            overflow-x: hidden;
+            background: #e8dfc4; /* 调深加温后的温润书页色 */
+            transition: background 0.3s;
+            position: relative;
+        }
+
+        /* 当 PDF 面板处于深色（反色）模式时，底层背景恢复为深色，让闪烁变成暗色闪烁 */
+        .pdf-panel.invert-mode {
+            background: rgba(10, 15, 30, 0.6);
+        }
+
+        .pdf-viewer-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%;
+        }
+
+        .pdf-page-container {
+            position: relative;
+            margin: 0; 
+            padding: 0;
+            line-height: 0;
+            background: #f1ebd7;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+            width: 100% !important;
+            border-bottom: 1px solid rgba(0,0,0,0.05);
+        }
+
+        .pdf-page-container canvas {
+            display: block;
+            width: 100% !important;
+            height: auto !important;
+            transition: filter 0.3s ease;
+            mix-blend-mode: multiply; /* 正片叠底：消除 Canvas 的纯白背景，使其透出底部的护眼米黄色 */
+            filter: sepia(0.5) contrast(0.95); /* 注入复古纸张调和，降低高频亮光，让纸质感更柔和沉稳 */
+        }
+
+        .pdf-panel.invert-mode canvas {
+            filter: invert(0.9) hue-rotate(180deg);
+        }
+
+        /* --- 词典面板主题切换 --- */
+        .dict-sidebar {
+            background: #f1ebd7; 
+            color: #1a1a1a;
+            transition: background 0.3s, color 0.3s;
+        }
+
+        /* 强制覆盖深色背景变量 */
+        .dict-sidebar:not(.dark-theme) {
+            background: #e8dfc4 !important; /* 深度联动左侧的羊皮纸护眼色 */
+        }
+
+        .dict-sidebar.dark-theme {
+            background: #1a1b1e; /* 深度灰，匹配 PDF 反色后的深色调 */
+            color: #ffffff;
+            border-left: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .dict-sidebar.dark-theme .sidebar-header {
+            background: rgba(0, 0, 0, 0.4);
+        }
+
+        .dict-sidebar.dark-theme .sidebar-title {
+            color: #ffffff;
+        }
+
+        .dict-sidebar.dark-theme .dict-word-title {
+            color: var(--color-cursor);
+        }
+
+        .dict-sidebar.dark-theme .dict-mdx-content {
+            color: #e2e8f0;
+        }
+
+        /* 浅色模式下的文字颜色 */
+        .dict-sidebar:not(.dark-theme) .dict-word-title {
+            color: #5c4308;
+            border-bottom-color: #bfae8a;
+        }
+
+        .dict-sidebar:not(.dark-theme) .dict-mdx-content {
+            color: #2b261f; /* 适度加深字重，在微调后的背景上更清晰、不费眼 */
+        }
+
+        @keyframes fadeInCanvas {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .textLayer {
+            position: absolute;
+            left: 0;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            overflow: hidden;
+            opacity: 1;
+            line-height: 1.0;
+            pointer-events: auto;
+        }
+        
+        .textLayer span {
+            color: transparent;
+            position: absolute;
+            white-space: pre;
+            cursor: text;
+            transform-origin: 0% 0%;
+            border-radius: 2px;
+        }
+        
+        .textLayer span::selection {
+            background: rgba(56, 189, 248, 0.4);
+        }
+
+        /* --- 可拖拽分割线 --- */
+        .split-divider {
+            width: 6px;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.1);
+            cursor: col-resize;
+            transition: background 0.2s;
+            position: relative;
+            z-index: 10;
+        }
+
+        .split-divider:hover, .split-divider.dragging {
+            background: var(--color-cursor);
+            box-shadow: 0 0 12px var(--color-cursor);
+        }
+
+        /* 右侧词典边栏 */
+        .dict-sidebar {
+            width: 420px; 
+            min-width: 250px;
+            max-width: 80vw;
+            height: 100%;
+            background: var(--card-bg);
+            border-left: 1px solid var(--card-border);
+            box-shadow: var(--shadow);
+            display: flex;
+            flex-direction: column;
+            z-index: 5;
+        }
+
+        .dict-sidebar:not(.dark-theme) {
+            background: #e8dfc4 !important;
+            border-left: 1px solid #c8bc9e !important; /* 调深边框，配合整体质感 */
+        }
+
+        .sidebar-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--card-border);
+            background: rgba(0, 0, 0, 0.2);
+        }
+
+        .sidebar-title {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 15px;
+        }
+
+        .btn-action {
+            background: var(--color-cursor);
+            color: #040814;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-action:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 0 15px rgba(56, 189, 248, 0.5);
+        }
+
+        .dict-content-container {
+            flex: 1;
+            padding: 24px;
+            overflow-y: auto;
+        }
+
+        #dict-content-area {
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .dict-word-title {
+            font-size: 30px;
+            font-weight: 900;
+            color: var(--color-cursor);
+            margin-bottom: 18px;
+            border-bottom: 2px solid var(--color-cursor);
+            padding-bottom: 10px;
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        .dict-mdx-content {
+            font-size: 1rem;
+            line-height: 1.6;
+            color: #e2e8f0;
+        }
+
+        /* 还原深色模式特制：深蓝音标与词头转高亮黄加粗 */
+        /* 仅在深色模式下将深蓝音标/词头转为高亮黄 */
+        .dict-sidebar.dark-theme .dict-mdx-content font[color="#0069b9" i],
+        .dict-sidebar.dark-theme .dict-mdx-content font[color="#0000D0" i],
+        .dict-sidebar.dark-theme .dict-mdx-content font[color="navy" i],
+        .dict-sidebar.dark-theme .dict-mdx-content b[style*="color:#0077cf" i],
+        .dict-sidebar.dark-theme .dict-mdx-content span[style*="color:#0077cf" i] {
+            color: #ffeb3b !important;
+            font-weight: bold !important;
+            text-shadow: 0 0 2px rgba(0, 0, 0, 0.8) !important;
+        }
+
+        /* 浅色模式保持原样 (蓝色) */
+        .dict-sidebar:not(.dark-theme) .dict-mdx-content font {
+            text-shadow: none !important;
+        }
+
+        #pdf-file-picker { display: none; }
+
+        .loading-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            display: none;
+            background: rgba(0,0,0,0.7);
+            padding: 20px 4px;
+            border-radius: 12px;
+            width: 200px;
+            border: 1px solid var(--card-border);
+            z-index: 100;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid rgba(255,255,255,0.1);
+            border-top-color: var(--color-cursor);
+            border-radius: 50%;
+            animation: spin 1s infinite linear;
+            margin: 0 auto 10px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .welcome-box {
+            text-align: center;
+            padding: 40px 20px;
+            opacity: 0.8;
+            width: 100%;
+        }
+    </style>
+
+<link rel="manifest" href="manifest.json">
+<script>
+if("service-worker" in navigator) navigator.serviceWorker.register("sw.js");
+window.addEventListener("click", function(){ var d=document.documentElement; (d.requestFullscreen||d.webkitRequestFullScreen).call(d); }, {once:true});
+</script>
+</head>
+<body>
+
+    <div class="fluid-bg">
+        <div class="circle circle-1"></div>
+        <div class="circle circle-2"></div>
+        <div class="circle circle-3"></div>
+        <div class="circle circle-4"></div>
+        <div class="circle circle-5"></div>
+    </div>
+    <div class="frosted-overlay"></div>
+
+    <div class="main-container">
+        
+        <div class="pdf-panel" id="pdfPanel">
+            <div class="pdf-viewer-content" id="pdfViewerContent">
+                <div class="welcome-box">
+                    <p style="font-size: 1.2rem; margin-bottom: 15px;">欢迎使用 PDF 智能点读机</p>
+                </div>
+            </div>
+            
+            <div class="loading-overlay" id="loadingOverlay">
+                <div class="spinner"></div>
+                <div style="font-size: 0.9rem; color: #fff;" id="loading-text">正在解析文献结构...</div>
+            </div>
+        </div>
+
+        <div class="split-divider" id="splitDivider"></div>
+
+        <div class="dict-sidebar" id="dictSidebar">
+            <div class="sidebar-header" id="sidebarHeader" style="display: flex; gap: 10px; padding: 15px 24px; position: relative;">
+                <button class="btn-action" onclick="document.getElementById('pdf-file-picker').click()">📂 PDF</button>
+                <button class="btn-action" style="background: #6366f1; color: white;" onclick="document.getElementById('dict-file-picker').click()">📥 词库</button>
+                <button class="btn-action" style="background: #475569; color: white;" onclick="togglePdfTheme()">🌓 模式</button>
+                <button onclick="toggleSidebarHeader()" style="position: absolute; right: 5px; top: 5px; cursor: pointer; border: none; background: transparent; opacity: 0.5; font-size: 16px;">⚙️</button>
+                <input type="file" id="pdf-file-picker" accept="application/pdf,.pdf" multiple>
+                <input type="file" id="dict-file-picker" accept=".json" style="display: none;">
+            </div>
+            <button id="showBtn" onclick="toggleSidebarHeader()" style="display: none; position: absolute; right: 10px; top: 10px; z-index: 100; cursor: pointer; border: none; background: rgba(255,255,255,0.1); padding: 8px 12px; border-radius: 8px; font-size: 18px;">⚙️</button>
+
+            <div class="dict-content-container">
+                <div id="dict-content-area">
+                    <div style="font-size: 24px; font-weight: 800; color: var(--text-muted); font-family: 'Courier New', monospace; text-align: center; padding-top: 40px;">
+                        READY
+                    </div>
+                    <p style="text-align: center; opacity: 0.5; font-size: 0.9rem; margin-top: 10px;">
+                        双击或点击左侧文献中的单词进行即时点读
+                    </p>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // 配置 PDF.js Worker
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        const DICT_DB_NAME = "MyPureDictDB";
+        const DICT_STORE_NAME = "words";
+        let localDictDb = null;
+        let currentPdfDoc = null;
+        let pageObserver = null; // 全局懒加载观察者
+
+        // 点击偏移校准：正值向下移动点击位置，负值向上移动。如果点高了就调大，点低了就调小。
+        const CLICK_Y_OFFSET = 0; 
+
+        const pdfPanel = document.getElementById('pdfPanel');
+        const pdfViewerContent = document.getElementById('pdfViewerContent');
+        const splitDivider = document.getElementById('splitDivider');
+        const dictSidebar = document.getElementById('dictSidebar');
+        const filePicker = document.getElementById('pdf-file-picker');
+        const dictFilePicker = document.getElementById('dict-file-picker');
+        const contentArea = document.getElementById('dict-content-area');
+        const loadingOverlay = document.getElementById('loadingOverlay');
+
+                // 核心修复：智能多模词库导入内核（完美兼容 wordany 词库）
+        dictFilePicker.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file || !localDictDb) return;
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+                try {
+                    const data = JSON.parse(evt.target.result);
+                    const tx = localDictDb.transaction([DICT_STORE_NAME], "readwrite");
+                    const store = tx.objectStore(DICT_STORE_NAME);
+                    
+                    let importedCount = 0;
+                    
+                    // 1. 如果是标准的数组格式
+                    if (Array.isArray(data)) {
+                        data.forEach(item => {
+                            if (item && item.word) {
+                                store.put({ word: item.word.toLowerCase(), translation: item.translation });
+                                importedCount++;
+                            }
+                        });
+                    } 
+                    // 2. 如果是 wordany 的【对象键值对】格式 (Object)
+                    else if (typeof data === 'object' && data !== null) {
+                        for (const [key, val] of Object.entries(data)) {
+                            // 自动提取字符串或对象内部的 translation
+                            const transText = typeof val === 'string' ? val : (val.translation || JSON.stringify(val));
+                            store.put({ 
+                                word: key.toLowerCase(), 
+                                translation: transText 
+                            });
+                            importedCount++;
+                        }
+                    }
+                    
+                    tx.oncomplete = () => {
+                        alert(`✅ 智能多模词库导入成功！已成功挂载 ${importedCount} 个词条。`);
+                        if (typeof checkDictDB === 'function') checkDictDB();
+                    };
+                    tx.onerror = () => alert("❌ iPad 沙盒数据库写入失败，请检查剩余空间");
+                } catch (err) { 
+                    alert("❌ 导入失败: JSON 文件解析错误或格式不兼容"); 
+                    console.error(err);
+                }
+            };
+            reader.readAsText(file);
+        });
+
+        // 1. 初始化数据库
+        function initDictDB() {
+            const req = indexedDB.open(DICT_DB_NAME, 1);
+            req.onupgradeneeded = (e) => {
+                let db = e.target.result;
+                if (!db.objectStoreNames.contains(DICT_STORE_NAME)) db.createObjectStore(DICT_STORE_NAME, { keyPath: "word" });
+            };
+            req.onsuccess = (e) => { localDictDb = e.target.result; };
+        }
+
+        // 2. 深度检索数据库 (含词态还原逻辑)
+        async function queryDictionary(word) {
+            if (!word) return;
+            const originalWord = word.replace(/[^a-zA-Z]/g, '').trim().toLowerCase();
+            if (!originalWord) return;
+
+            // 发音播放
+            try {
+                const synth = window.speechSynthesis;
+                if (synth) {
+                    synth.cancel();
+                    const utterance = new SpeechSynthesisUtterance(originalWord);
+                    utterance.lang = 'en-US';
+                    synth.speak(utterance);
+                }
+            } catch(e) {}
+
+            if (!localDictDb) return;
+
+            // 核心存取函数：尝试单字检索
+            const dbGet = async (w) => {
+                return new Promise(resolve => {
+                    const tx = localDictDb.transaction([DICT_STORE_NAME], "readonly");
+                    const req = tx.objectStore(DICT_STORE_NAME).get(w);
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => resolve(null);
+                });
+            };
+
+            let result = await dbGet(originalWord);
+
+            // 如果第一遍直接找到了原词，直接跳过所有删减衍生逻辑！
+            if (!result && originalWord.length > 2) {
+                // 只有原词找不到，才开启“无数的轮回”：分级分批生成数十种严谨的变形还原规则
+                let queue = [];
+                let w = originalWord;
+
+                // 【级别 1：副词形态还原系列 (ly / ily / ally)】
+                if (w.endsWith('ly')) {
+                    queue.push(w.slice(0, -2)); // 去ly -> surgically -> surgicall
+                    if (w.endsWith('ally')) queue.push(w.slice(0, -4)); // 去ally -> surgically -> surgical
+                    if (w.endsWith('ily')) { queue.push(w.slice(0, -3) + 'y'); queue.push(w.slice(0, -2)); }
+                    if (w.endsWith('bly')) queue.push(w.slice(0, -3) + 'le');
+                }
+
+                // 【级别 2：名词复数/动词三单系列 (ies / es / s / ves)】
+                if (w.endsWith('ies')) queue.push(w.slice(0, -3) + 'y');
+                else if (w.endsWith('ves')) { queue.push(w.slice(0, -3) + 'f'); queue.push(w.slice(0, -3) + 'fe'); }
+                else if (w.endsWith('oes')) queue.push(w.slice(0, -2));
+                else if (w.endsWith('es')) { queue.push(w.slice(0, -2)); queue.push(w.slice(0, -1)); }
+                else if (w.endsWith('s') && !w.endsWith('ss')) queue.push(w.slice(0, -1));
+
+                // 【级别 3：过去式/过去分词系列 (ied / ed)】
+                if (w.endsWith('ied')) queue.push(w.slice(0, -3) + 'y');
+                else if (w.endsWith('ed')) {
+                    queue.push(w.slice(0, -2)); // 去ed (look)
+                    queue.push(w.slice(0, -1)); // 去d保留e (live)
+                    if (w.length > 5 && w[w.length-3] === w[w.length-4]) queue.push(w.slice(0, -3)); // 双写辅音还原 (stopped -> stop)
+                }
+
+                // 【级别 4：现在分词系列 (ing)】
+                if (w.endsWith('ing')) {
+                    queue.push(w.slice(0, -3)); // 去ing (do)
+                    queue.push(w.slice(0, -3) + 'e'); // 去ing加e (make)
+                    queue.push(w.slice(0, -3) + 'ie'); // ie变y还原 (dying -> die)
+                    if (w.length > 6 && w[w.length-4] === w[w.length-5]) queue.push(w.slice(0, -4)); // 双写分词还原 (running -> run)
+                }
+
+                // 【级别 5：形容词/名词高级后缀系列 (ier / iest / er / est / th / ity / ment)】
+                if (w.endsWith('iest')) queue.push(w.slice(0, -4) + 'y');
+                else if (w.endsWith('est')) { queue.push(w.slice(0, -3)); queue.push(w.slice(0, -2)); }
+                if (w.endsWith('ier')) queue.push(w.slice(0, -3) + 'y');
+                else if (w.endsWith('er')) { queue.push(w.slice(0, -2)); queue.push(w.slice(0, -1)); }
+                if (w.endsWith('th')) queue.push(w.slice(0, -2)); // 序数词 (fifth -> five / n -> th)
+                if (w.endsWith('ity')) queue.push(w.slice(0, -3) + 'e'); // 抽象名词 (purity -> pure)
+                if (w.endsWith('ment')) queue.push(w.slice(0, -4)); // 名词 (movement -> move)
+
+                // 去重并清除无效词
+                let uniqueVariants = [...new Set(queue)].filter(v => v && v.length > 1 && v !== originalWord);
+
+                // 按照生成的规则链条，依次进入数据库轮回检索，查到任意一个立刻中断并返回
+                for (const variant of uniqueVariants) {
+                    result = await dbGet(variant);
+                    if (result) break;
+                }
+            }
+
+            const dictContainer = document.querySelector('.dict-content-container');
+            dictContainer.scrollTop = 0;
+            if (result) {
+                contentArea.innerHTML = `
+                    <div class="dict-word-title">${result.word}</div>
+                    <div class="dict-mdx-content">${result.translation}</div>
+                `;
+            } else {
+                contentArea.innerHTML = `
+                    <div class="dict-word-title" style="color:var(--color-wrong); border-bottom-color:var(--color-wrong);">${originalWord}</div>
+                    <p style="opacity:0.6; font-size:0.95rem; line-height:1.6;">本地数据库中暂无该词及其原形的深度释义。</p>
+                `;
+            }
+        }
+
+        // 3. 左右滑动分界 (增加平板触摸支持)
+        let isDragging = false;
+        const startDrag = () => {
+            isDragging = true;
+            splitDivider.classList.add('dragging');
+            document.body.style.userSelect = 'none';
+            document.body.style.touchAction = 'none'; // 禁止触摸时的默认滚动
+        };
+        const endDrag = () => {
+            if (isDragging) {
+                isDragging = false;
+                splitDivider.classList.remove('dragging');
+                document.body.style.userSelect = '';
+                document.body.style.touchAction = '';
+                if (currentPdfDoc) {
+                    const savedPage = findCurrentVisiblePage();
+                    initVirtualRender(savedPage);
+                }
+            }
+        };
+        const moveDrag = (clientX) => {
+            if (!isDragging) return;
+            const windowWidth = window.innerWidth;
+            let targetSidebarWidth = windowWidth - clientX;
+            if (targetSidebarWidth < 250) targetSidebarWidth = 250;
+            if (targetSidebarWidth > windowWidth * 0.8) targetSidebarWidth = windowWidth * 0.8;
+            dictSidebar.style.width = targetSidebarWidth + 'px';
+        };
+
+        // 鼠标事件
+        splitDivider.addEventListener('mousedown', startDrag);
+        window.addEventListener('mousemove', (e) => moveDrag(e.clientX));
+        window.addEventListener('mouseup', endDrag);
+
+        // 触摸事件 (平板支持)
+        splitDivider.addEventListener('touchstart', (e) => { startDrag(); }, {passive: true});
+        window.addEventListener('touchmove', (e) => {
+            if (isDragging) moveDrag(e.touches[0].clientX);
+        }, {passive: true});
+        window.addEventListener('touchend', endDrag);
+
+        // 获取当前视野里最靠上的页面索引，用于重绘后精确定位
+        function findCurrentVisiblePage() {
+            const containers = document.querySelectorAll('.pdf-page-container');
+            let bestPage = 1;
+            let minTop = Infinity;
+            containers.forEach(el => {
+                const rect = el.getBoundingClientRect();
+                const dist = Math.abs(rect.top);
+                if (dist < minTop) {
+                    minTop = dist;
+                    bestPage = parseInt(el.dataset.pageNumber);
+                }
+            });
+            return bestPage;
+        }
+
+        // 4. ✅ 修复核心：PDF 智能虚拟懒加载 (防内存溢出)
+        filePicker.addEventListener('change', (e) => {
+            const file = e.target.files[0] || (e.target.files.length > 0 ? e.target.files[0] : null);
+            if (!file) return;
+            loadingOverlay.style.display = 'block';
+            document.getElementById('loading-text').innerText = "正在解析文档结构...";
+            const fileReader = new FileReader();
+            fileReader.onload = function() {
+                const typedarray = new Uint8Array(this.result);
+                pdfjsLib.getDocument(typedarray).promise.then((pdf) => {
+                    currentPdfDoc = pdf;
+                    initVirtualRender(1);
+                }).catch(err => {
+                    alert("PDF解析失败: " + err.message);
+                    loadingOverlay.style.display = 'none';
+                });
+            };
+            fileReader.readAsArrayBuffer(file);
+        });
+
+        async function initVirtualRender(targetPageNum = 1) {
+            if (!currentPdfDoc) return;
+            loadingOverlay.style.display = 'block';
+            pdfViewerContent.innerHTML = '';
+            
+            // 如果之前有观察者，先断开
+            if (pageObserver) pageObserver.disconnect();
+
+            const containerWidth = pdfPanel.clientWidth;
+            
+            // 预先抓取第 1 页的尺寸，用来预估其他页面的高度，撑开正确的系统滚动条
+            let estimatedRatio = 1.414; 
+            try {
+                const page1 = await currentPdfDoc.getPage(1);
+                const vp = page1.getViewport({ scale: 1 });
+                estimatedRatio = vp.height / vp.width;
+            } catch(e) {}
+            const estimatedHeight = containerWidth * estimatedRatio;
+
+            // 1. 先瞬间生成所有页面的“骨架”（div外壳），不画 Canvas
+            for (let pageNum = 1; pageNum <= currentPdfDoc.numPages; pageNum++) {
+                const pageContainer = document.createElement('div');
+                pageContainer.className = 'pdf-page-container';
+                pageContainer.id = `page-container-${pageNum}`;
+                pageContainer.dataset.pageNumber = pageNum;
+                pageContainer.dataset.rendered = 'false';
+                pageContainer.style.height = `${estimatedHeight}px`; // 预撑开高度，防止滚动乱跳
+                
+                pdfViewerContent.appendChild(pageContainer);
+            }
+
+            // 瞬间切换到目标页面位置，彻底取消滚动过渡平滑
+            if (targetPageNum > 1) {
+                const targetEl = document.getElementById(`page-container-${targetPageNum}`);
+                if (targetEl) {
+                    pdfPanel.scrollTo({ top: targetEl.offsetTop, behavior: 'instant' });
+                }
+            }
+
+            loadingOverlay.style.display = 'none';
+
+            // 2. 配置 Intersection Observer 懒加载引擎
+            // 触发条件：当页面骨架进入视野，或即将进入视野（上下各多预留 150% 的缓冲高度）时渲染
+            pageObserver = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    const container = entry.target;
+                    if (entry.isIntersecting) {
+                        if (container.dataset.rendered === 'false') {
+                            container.dataset.rendered = 'true';
+                            renderSinglePage(container, parseInt(container.dataset.pageNumber), containerWidth);
+                        }
+                    } else {
+                        // 核心：自动释放视野外内存，防止崩溃
+                        if (container.dataset.rendered === 'true') {
+                            container.innerHTML = '';
+                            container.dataset.rendered = 'false';
+                        }
+                    }
+                });
+            }, { 
+                root: pdfPanel, 
+                rootMargin: '100% 0px 100% 0px' // 缩短预加载范围，兼顾性能与流畅度
+            });
+
+            // 把所有页面骨架送进观察器
+            document.querySelectorAll('.pdf-page-container').forEach(el => pageObserver.observe(el));
+
+            // 强制重置观察者，确保定位后立刻触发当前页渲染，防止白屏或字体错位
+            setTimeout(() => {
+                if (pageObserver) {
+                    document.querySelectorAll('.pdf-page-container').forEach(el => {
+                        pageObserver.unobserve(el);
+                        pageObserver.observe(el);
+                    });
+                }
+            }, 50);
+        }
+
+        async function renderSinglePage(container, pageNum, containerWidth) {
+            try {
+                // 渲染前清空，防止重复渲染叠加导致的坐标偏移
+                container.innerHTML = ''; 
+                const page = await currentPdfDoc.getPage(pageNum);
+                
+                // 实时计算当前容器宽度，解决拖拽后识别偏移问题
+                const currentWidth = pdfPanel.clientWidth;
+                const unscaledViewport = page.getViewport({ scale: 1 });
+                const scale = currentWidth / unscaledViewport.width;
+                const viewport = page.getViewport({ scale: scale });
+
+                container.style.height = `${viewport.height}px`;
+                // 这里的变量必须与 PDF.js 内部 textLayer 的 CSS 预期一致
+                container.style.setProperty('--scale-factor', scale);
+
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                
+                // 🚀 核心高清化：获取设备像素比 (Retina 屏幕深度适配)
+                const outputScale = window.devicePixelRatio || 1;
+                
+                // 设置 Canvas 内部实际绘图分辨率 (按倍数放大)
+                canvas.width = Math.floor(viewport.width * outputScale);
+                canvas.height = Math.floor(viewport.height * outputScale);
+                
+                // 设置 Canvas 外部实际显示的 CSS 尺寸
+                canvas.style.width = Math.floor(viewport.width) + "px";
+                canvas.style.height = Math.floor(viewport.height) + "px";
+                
+                container.appendChild(canvas);
+
+                const textLayerDiv = document.createElement('div');
+                textLayerDiv.className = 'textLayer';
+                // 确保 textLayer 尺寸与显示尺寸绝对一致
+                textLayerDiv.style.width = Math.floor(viewport.width) + "px";
+                textLayerDiv.style.height = Math.floor(viewport.height) + "px";
+                container.appendChild(textLayerDiv);
+
+                // 将放大倍数写入渲染引擎的矩阵变换中
+                const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null;
+
+                await page.render({ 
+                    canvasContext: context, 
+                    transform: transform,
+                    viewport: viewport 
+                }).promise;
+
+                const textContent = await page.getTextContent();
+                pdfjsLib.renderTextLayer({
+                    textContent: textContent,
+                    container: textLayerDiv,
+                    viewport: viewport,
+                    textDivs: []
+                });
+            } catch (error) {
+                console.error(`渲染第 ${pageNum} 页时发生故障:`, error);
+            }
+        }
+
+        // 5. 事件委托 (优化点读精度与自动偏移校准)
+        pdfViewerContent.addEventListener('click', (e) => {
+            // 1. 获取点击处的精确文本（通过浏览器 Range API 替代手动计算）
+            let range, textNode, offset;
+            const adjustedY = e.clientY + CLICK_Y_OFFSET;
+
+            if (document.caretRangeFromPoint) {
+                range = document.caretRangeFromPoint(e.clientX, adjustedY);
+            } else if (document.caretPositionFromPoint) {
+                const pos = document.caretPositionFromPoint(e.clientX, adjustedY);
+                if (pos) {
+                    range = document.createRange();
+                    range.setStart(pos.offsetNode, pos.offset);
+                    range.collapse(true);
+                }
+            }
+
+            if (range && range.startContainer.nodeType === Node.TEXT_NODE) {
+                textNode = range.startContainer;
+                offset = range.startOffset;
+                const text = textNode.textContent;
+
+                // 向前后寻找单词边界
+                const isWordChar = (char) => /[a-zA-Z0-9'-]/.test(char);
+                let start = offset;
+                let end = offset;
+                while (start > 0 && isWordChar(text[start - 1])) start--;
+                while (end < text.length && isWordChar(text[end])) end++;
+
+                const preciseWord = text.slice(start, end).trim();
+                if (preciseWord.length > 1) {
+                    queryDictionary(preciseWord);
+                    // 视觉反馈：选中单词
+                    const sel = window.getSelection();
+                    const newRange = document.createRange();
+                    newRange.setStart(textNode, start);
+                    newRange.setEnd(textNode, end);
+                    sel.removeAllRanges();
+                    sel.addRange(newRange);
+                    return;
+                }
+            }
+
+            // 2. 备选方案：如果上述失败，尝试原有的 Selection 或直接 Target 获取
+            const selection = window.getSelection();
+            const selectedText = selection.toString().trim();
+            if (selectedText && selectedText.length < 50) {
+                queryDictionary(selectedText);
+            }
+        });
+
+        pdfViewerContent.addEventListener('dblclick', (e) => {
+            const selection = window.getSelection();
+            const selectedText = selection.toString().trim();
+            if (selectedText) {
+                queryDictionary(selectedText);
+            }
+        });
+
+        function togglePdfTheme() {
+            pdfPanel.classList.toggle('invert-mode');
+            dictSidebar.classList.toggle('dark-theme');
+        }
+
+        function toggleSidebarHeader() {
+            const header = document.getElementById('sidebarHeader');
+            const btn = document.getElementById('showBtn');
+            if (header.style.display === 'none') {
+                header.style.display = 'flex';
+                btn.style.display = 'none';
+            } else {
+                header.style.display = 'none';
+                btn.style.display = 'block';
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            initDictDB();
+            
+            // 动态注入针对安卓/三星系统底层的最强秒开通道指令
+            const picker = document.getElementById('pdf-file-picker');
+            if (picker) {
+                // 核心：强制调用系统原生“文档驱动”，直接锁定最近文档或特定安全渠道，死死卡住媒体扫描器
+                picker.setAttribute('type', 'file');
+                picker.setAttribute('accept', 'application/pdf');
+                // 强制要求系统使用 DOCUMENTS 渠道而不是 MEDIA 渠道
+                picker.removeAttribute('multiple');
+            }
+        });
+
+        // 窗口拉伸防抖动重绘
+        let resizeTimeout;
+        window.addEventListener('resize', () => {
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(() => {
+                if (currentPdfDoc) {
+                    const savedPage = findCurrentVisiblePage();
+                    initVirtualRender(savedPage);
+                }
+            }, 300);
+        });
+    </script>
+</body>
+</html>
